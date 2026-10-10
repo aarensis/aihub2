@@ -163,3 +163,41 @@ for(const [id,info] of Object.entries(d.providers)){const row=document.createEle
 $('settings').onclick=async()=>{$('settingsDialog').showModal();renderKeys()};$('closeSettings').onclick=()=>$('settingsDialog').close();$('useCustom').onclick=()=>{const v=$('customModel').value.trim();if(!v)return;state.models[$('provider').value]=v;models();save();$('settingsDialog').close()};
 $('export').onclick=()=>{const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='ai-hub-backup.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};$('import').onclick=()=>$('importFile').click();$('importFile').onchange=async e=>{try{const d=JSON.parse(await e.target.files[0].text());if(!Array.isArray(d.chats))throw Error('Invalid backup');if(!confirm('Replace current chats with this backup?'))return;state={...state,...d};for(const c of state.chats)await syncChat(c);save();render();$('settingsDialog').close()}catch(err){alert(err.message)}};$('clear').onclick=async()=>{if(confirm('Permanently delete all chats?')){const ids=state.chats.map(c=>c.id);state.chats=[];state.active=null;save();render();for(const id of ids)await deleteCloudChat(id);$('settingsDialog').close()}};
 showSession();
+//JavaScript logic to fetch the models and render them into the new container.
+async function loadModelsView() {
+  const container = document.getElementById('models-container');
+  container.innerHTML = '<p class="text-gray-400">Loading models...</p>';
+  
+  try {
+    const res = await fetch('/.netlify/functions/api');
+    const models = await res.json();
+    
+    container.innerHTML = models.map(m => `
+      <div class="model-card border p-4 rounded-lg bg-[#161b22] border-[#30363d] flex flex-col justify-between">
+        <div>
+          <div class="flex justify-between items-start mb-2">
+            <h3 class="font-semibold text-white">${m.name}</h3>
+            <span class="text-xs px-2 py-1 rounded bg-[#21262d] text-cyan-400 font-mono">${m.id}</span>
+          </div>
+          <p class="text-sm text-gray-400 mb-4 line-clamp-2">${m.description || 'No description provided.'}</p>
+        </div>
+        <div class="flex justify-between items-center text-xs text-gray-500 border-t border-[#30363d] pt-3">
+          <span>Context: ${(m.context_length / 1000).toFixed(0)}k tokens</span>
+          <span class="text-gray-400">$${(m.pricing?.prompt * 1000000 || 0).toFixed(2)} / M tokens</span>
+        </div>
+      </div>
+    `).join('');
+  } catch (err) {
+    container.innerHTML = '<p class="text-red-400">Failed to load models.</p>';
+  }
+}
+
+// Update your view switcher function to trigger loadModelsView when selected
+function switchView(viewName) {
+  document.querySelectorAll('.view-section').forEach(el => el.classList.add('hidden'));
+  if (viewName === 'models') {
+    document.getElementById('models-view').classList.remove('hidden');
+    loadModelsView();
+  }
+  // handle other views here...
+}
