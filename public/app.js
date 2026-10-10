@@ -16,7 +16,6 @@ const knownLimits={'groq/llama-3.1-8b-instant':{day:500000},'groq/llama-3.3-70b-
 function supportsImages(p,id){if(p==='gemini'||p==='openai')return true;if(p==='openrouter'){const lm=(liveModels.openrouter||[]).find(x=>x.id===id);return lm?lm.vision:(id==='openrouter/free'||/gemma-4/.test(id)?true:null)}return false}
 const save=()=>localStorage.setItem(store,JSON.stringify({...state,chats:[]}));const current=()=>state.chats.find(c=>c.id===state.active);const folderName=id=>state.folders.find(f=>f.id===id)?.name||'Unfiled';
 const aiToolCatalog=[
-const aiToolCatalog=[
 {cat:'Study & Learning',name:'Google Gemini',desc:'Explanations, revision plans and worked examples.',provider:'gemini',model:'gemini-3.8-flash',kind:'model'},
 {cat:'Study & Learning',name:'ChatGPT',desc:'Open ChatGPT website.',url:'https://chatgpt.com/',kind:'external'},
 {cat:'Study & Learning',name:'Groq',desc:'Fast chat models for tutoring and practice.',provider:'groq',model:'openai/gpt-oss-120b',kind:'model'},
