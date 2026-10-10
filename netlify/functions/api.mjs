@@ -51,9 +51,6 @@ async function openrouterFreeModels() {
 }
 
 // ---- Per-user API keys -------------------------------------------------------------------------
-// Keys are encrypted (AES-256-GCM) with KEY_ENCRYPTION_SECRET, which only exists in Netlify. The ciphertext is bound
-// to the user id + provider, so a row copied to another user/provider will not decrypt. The browser can save or
-// delete a key but is never sent it back.
 const PROVIDER_LABELS = { openai: 'OpenAI', groq: 'Groq', openrouter: 'OpenRouter', gemini: 'Google Gemini', cerebras: 'Cerebras' };
 const encKey = () => { const s = process.env.KEY_ENCRYPTION_SECRET; return s && s.length >= 16 ? crypto.createHash('sha256').update(s).digest() : null; };
 export function encrypt(plain, aad) {
@@ -79,8 +76,6 @@ async function userKey(jwt, userId, provider) {
   catch { throw new Error('Your saved ' + PROVIDER_LABELS[provider] + ' key could not be decrypted (KEY_ENCRYPTION_SECRET changed?). Re-enter it in Settings.'); }
 }
 
-// Record usage in Supabase under the signed-in user's own session (row-level security applies),
-// so the totals are shared by every device that logs in as this user.
 async function logUsage(jwt, row) {
   try {
     const r = await fetch(process.env.SUPABASE_URL + '/rest/v1/token_usage', {
@@ -95,6 +90,18 @@ async function logUsage(jwt, row) {
 
 export async function handler(event) {
   const action = event.path.split('/').pop();
+
+  // Global GET models proxy endpoint
+  if (action === 'models' && event.httpMethod === 'GET' && !event.headers.authorization) {
+    try {
+      const responseAPI = await fetch("https://openrouter.ai/api/v1/models");
+      const data = await responseAPI.json();
+      return response(200, data.data);
+    } catch (error) {
+      return response(500, { error: error.message });
+    }
+  }
+
   if (action === 'config' && event.httpMethod === 'GET') {
     return response(200, {
       supabaseUrl: process.env.SUPABASE_URL || '',
@@ -103,15 +110,16 @@ export async function handler(event) {
       adminEmail: process.env.ADMIN_EMAIL || ''
     });
   }
+
   if (!['providers', 'chat', 'models', 'keys'].includes(action)) return response(404, { error: 'Not found' });
   const jwt = (event.headers.authorization || event.headers.Authorization || '').replace(/^Bearer /i, '');
   if (!jwt) return response(401, { error: 'Sign in required' });
+  
   try {
     const auth = await fetch(process.env.SUPABASE_URL + '/auth/v1/user', { headers: { apikey: process.env.SUPABASE_ANON_KEY, Authorization: 'Bearer ' + jwt } });
     if (!auth.ok) return response(401, { error: 'Invalid session' });
     const user = await auth.json();
     if (!user.id) return response(401, { error: 'Invalid session' });
-    // Any account you created in Supabase may sign in. Only the admin may fall back to the Netlify-level keys.
     const isAdmin = !!process.env.ADMIN_EMAIL && user.email?.toLowerCase() === process.env.ADMIN_EMAIL.toLowerCase();
 
     if (action === 'providers') {
@@ -129,26 +137,26 @@ export async function handler(event) {
       if (!Object.hasOwn(providers, provider)) return response(400, { error: 'Unknown provider' });
       if (remove) {
         const r = await rest(jwt, `user_api_keys?user_id=eq.${user.id}&provider=eq.${provider}`, { method: 'DELETE' });
-        return r.ok ? response(200, { ok: true }) : response(500, { error: 'Could not remove the key. Run the updated supabase.sql in Supabase.' });
+        return r.ok ? response(200, { ok: true }) : response(500, { error: 'Could not remove the key.' });
       }
       const k = typeof key === 'string' ? key.trim() : '';
-      if (k.length < 8 || k.length > 600 || /\s/.test(k)) return response(400, { error: 'That does not look like an API key (no spaces, at least 8 characters).' });
+      if (k.length < 8 || k.length > 600 || /\s/.test(k)) return response(400, { error: 'Invalid API key format.' });
       const key_enc = encrypt(k, user.id + ':' + provider);
       const r = await rest(jwt, 'user_api_keys?on_conflict=user_id,provider', {
         method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
         body: JSON.stringify({ user_id: user.id, provider, key_enc, last4: k.slice(-4), updated_at: new Date().toISOString() })
       });
-      return r.ok ? response(200, { ok: true, last4: k.slice(-4) }) : response(500, { error: 'Could not save the key. Run the updated supabase.sql in Supabase.' });
+      return r.ok ? response(200, { ok: true, last4: k.slice(-4) }) : response(500, { error: 'Could not save the key.' });
     }
 
     if (action === 'models') {
       const provider = event.queryStringParameters?.provider;
-      if (provider !== 'openrouter') return response(400, { error: 'Live model lists are only available for OpenRouter' });
+      if (provider && provider !== 'openrouter') return response(400, { error: 'Live model lists only available for OpenRouter' });
       return response(200, { models: await openrouterFreeModels() });
     }
 
     if (event.httpMethod !== 'POST') return response(405, { error: 'Method not allowed' });
-    if ((event.body || '').length > MAX_BODY_CHARS) return response(413, { error: 'Request too large. Remove an image or attach fewer files.' });
+    if ((event.body || '').length > MAX_BODY_CHARS) return response(413, { error: 'Request too large.' });
     const { provider, model, messages } = JSON.parse(event.body || '{}');
     if (!Object.hasOwn(providers, provider) || typeof model !== 'string' || model.length > 180 || !model.trim() || !Array.isArray(messages) || messages.length > 150 ||
       !messages.every(m => m && ['user', 'assistant', 'system'].includes(m.role) && validContent(m.content)) || countImages(messages) > MAX_IMAGES_TOTAL) {
@@ -157,7 +165,7 @@ export async function handler(event) {
     const p = providers[provider];
     let key = await userKey(jwt, user.id, provider);
     if (!key && isAdmin) key = process.env[p.env];
-    if (!key) return response(400, { error: 'Add your ' + PROVIDER_LABELS[provider] + ' API key in Settings → API keys to use this provider.' });
+    if (!key) return response(400, { error: 'Add your API key in Settings.' });
 
     const r = await fetch(p.url, {
       method: 'POST',
@@ -166,10 +174,9 @@ export async function handler(event) {
       signal: AbortSignal.timeout(22000)
     });
     const data = await r.json();
-    if (!r.ok) return response(r.status, { error: data.error?.message || data[0]?.error?.message || JSON.stringify(data).slice(0, 500) });
+    if (!r.ok) return response(r.status, { error: data.error?.message || JSON.stringify(data).slice(0, 500) });
 
     const content = data.choices?.[0]?.message?.content || '';
-    // Use provider-reported usage; if a provider omits it, fall back to a rough estimate and flag it as such.
     let input = Number(data.usage?.prompt_tokens ?? data.usage?.input_tokens) || 0;
     let output = Number(data.usage?.completion_tokens ?? data.usage?.output_tokens) || 0;
     let total = Number(data.usage?.total_tokens) || input + output;
@@ -184,22 +191,5 @@ export async function handler(event) {
     return response(200, { content, usage: { input, output, total, estimated }, logged });
   } catch (e) {
     return response(500, { error: e.name === 'TimeoutError' ? 'Provider request timed out' : e.message });
-  }
-}
-// Models Fetch
-if (event.path.endsWith('/models') || event.httpMethod === 'GET') {
-  try {
-    const response = await fetch("https://openrouter.ai/api/v1/models");
-    const data = await response.json();
-    return {
-      statusCode: 200,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data.data)
-    };
-  } catch (error) {
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: error.message })
-    };
   }
 }
