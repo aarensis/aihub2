@@ -119,3 +119,8 @@ create policy "Own keys insert" on public.user_api_keys for insert to authentica
 create policy "Own keys update" on public.user_api_keys for update to authenticated using (user_id=auth.uid()) with check (user_id=auth.uid());
 create policy "Own keys delete" on public.user_api_keys for delete to authenticated using (user_id=auth.uid());
 grant select, insert, update, delete on public.user_api_keys to authenticated;
+
+-- ============================================================================
+-- Per-chat context settings + handoff summaries
+-- ============================================================================
+alter table public.chats add column if not exists meta jsonb not null default '{}'::jsonb;

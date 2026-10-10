@@ -75,3 +75,12 @@
 - **Served model**: every reply shows which model the provider says answered. Green "served by X" = matches (or a versioned build of it); amber "requested X → served Y" = the provider answered with a different model; "router picked Y" for `openrouter/free`. If a provider doesn't report it, the reply says so.
 - **Donut charts** in the token panel for today / week / month: red = used, green = left, grey dashed = no limit set.
 - **Token limits manager** ("Set limits"): set day/week/month limits for any individual model, for a whole provider key, or for everything combined. Saved to your login. Grey hints show published free-tier caps. Sending while a limit is already used up asks for confirmation first (it warns; it does not hard-block).
+
+## Update: context continuity across models
+Under the message box:
+- **This chat's history** (on by default): sends the chat's earlier messages to whichever model you pick, so you can switch providers mid-chat. Off = each message is sent alone.
+- **Other chats in this folder** (off by default): adds short digests of the other chats in the same folder (their summary if they have one). Chats in other folders are never included. Replaces the old keyword-only option.
+- **Budget** (default 12k, synced to your login): approximate cap on context tokens per message. When history exceeds it, the oldest messages are left out (the opening message is kept) and a warning shows how many.
+- **Compact**: summarizes older messages into a model-neutral handoff summary (the last 6 messages stay verbatim). Nothing is deleted from the chat; the summary is sent instead of the old messages, to any model. It costs tokens once (counted in the meter). "Clear summary" reverses it.
+- Options and summaries are stored per chat (new `meta` column; re-run `supabase.sql`). Without the column the app still works and keeps them in this browser only.
+- Token counts here are estimates (about 3.6 characters per token).
