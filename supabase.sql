@@ -96,3 +96,26 @@ language sql stable security invoker set search_path = public as $$
  group by t.provider, t.model, p.period
 $$;
 grant execute on function public.token_usage_totals(timestamptz, timestamptz, timestamptz) to authenticated;
+
+-- ============================================================================
+-- Per-user API keys (multi-user support)
+-- Keys are stored ENCRYPTED by the Netlify function (needs KEY_ENCRYPTION_SECRET). Safe to re-run.
+-- ============================================================================
+create table if not exists public.user_api_keys (
+ user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+ provider text not null check (provider in ('openai','groq','openrouter','gemini','cerebras')),
+ key_enc text not null,
+ last4 text not null default '',
+ updated_at timestamptz not null default now(),
+ primary key (user_id, provider)
+);
+alter table public.user_api_keys enable row level security;
+drop policy if exists "Own keys read" on public.user_api_keys;
+drop policy if exists "Own keys insert" on public.user_api_keys;
+drop policy if exists "Own keys update" on public.user_api_keys;
+drop policy if exists "Own keys delete" on public.user_api_keys;
+create policy "Own keys read" on public.user_api_keys for select to authenticated using (user_id=auth.uid());
+create policy "Own keys insert" on public.user_api_keys for insert to authenticated with check (user_id=auth.uid());
+create policy "Own keys update" on public.user_api_keys for update to authenticated using (user_id=auth.uid()) with check (user_id=auth.uid());
+create policy "Own keys delete" on public.user_api_keys for delete to authenticated using (user_id=auth.uid());
+grant select, insert, update, delete on public.user_api_keys to authenticated;

@@ -59,3 +59,13 @@
 **Formatting**: markdown (bold, italic, `<u>` underline, strike, headings, lists, task lists, tables, quotes, code blocks with Copy, links, images). Ctrl/Cmd+B/I/U format your input. The "Aa Rich/Plain" button switches to plain text (links clickable, images shown); synced to your login; each assistant message also has its own toggle.
 
 **Netlify note**: requests are capped at about 6 MB by Netlify Functions, which is why images are compressed first. The 100 MB limit applies to the file you pick; for text/PDF only the first 40,000 characters are sent.
+
+
+## Multi-user accounts and your own API keys
+- **Everyone signs in with email + password.** The admin can still type the admin username. Chats, folders, token usage, limits and keys are private to each account (enforced by Supabase row-level security).
+- **Add users** in Supabase: Authentication -> Users -> Add user (tick auto-confirm). **Turn off public sign-ups** (Authentication -> Sign In / Providers -> "Allow new users to sign up" off), otherwise anyone could register.
+- **API keys**: Settings -> API keys. Each user enters their own keys. Keys are encrypted by the Netlify function (AES-256-GCM, bound to user + provider) with `KEY_ENCRYPTION_SECRET`, stored in `user_api_keys`, and never sent back to the browser (only the last 4 characters).
+- **Server keys are optional.** If `GEMINI_API_KEY` etc. exist in Netlify, only the admin account can use them (their own saved key wins). Other users never use them. You can delete all of them.
+- **Required new variable:** `KEY_ENCRYPTION_SECRET` (16+ chars, mark as secret). If you change or lose it, saved keys cannot be decrypted and users must re-enter them.
+- Trust note: this protects keys from database leaks, not from the site owner, who controls the server secret.
+- Re-run `supabase.sql` once more (adds `user_api_keys`).

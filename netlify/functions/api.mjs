@@ -1,3 +1,5 @@
+import crypto from 'node:crypto';
+
 const providers = {
   openai: { url: 'https://api.openai.com/v1/chat/completions', env: 'OPENAI_API_KEY' },
   groq: { url: 'https://api.groq.com/openai/v1/chat/completions', env: 'GROQ_API_KEY' },
@@ -48,6 +50,35 @@ async function openrouterFreeModels() {
   return list;
 }
 
+// ---- Per-user API keys -------------------------------------------------------------------------
+// Keys are encrypted (AES-256-GCM) with KEY_ENCRYPTION_SECRET, which only exists in Netlify. The ciphertext is bound
+// to the user id + provider, so a row copied to another user/provider will not decrypt. The browser can save or
+// delete a key but is never sent it back.
+const PROVIDER_LABELS = { openai: 'OpenAI', groq: 'Groq', openrouter: 'OpenRouter', gemini: 'Google Gemini', cerebras: 'Cerebras' };
+const encKey = () => { const s = process.env.KEY_ENCRYPTION_SECRET; return s && s.length >= 16 ? crypto.createHash('sha256').update(s).digest() : null; };
+export function encrypt(plain, aad) {
+  const k = encKey(); if (!k) throw new Error('KEY_ENCRYPTION_SECRET is not configured in Netlify (needs 16+ characters).');
+  const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', k, iv); c.setAAD(Buffer.from(aad));
+  const ct = Buffer.concat([c.update(plain, 'utf8'), c.final()]);
+  return [iv, c.getAuthTag(), ct].map(b => b.toString('base64')).join('.');
+}
+export function decrypt(blob, aad) {
+  const k = encKey(); if (!k) throw new Error('KEY_ENCRYPTION_SECRET is not configured in Netlify.');
+  const [iv, tag, ct] = String(blob).split('.').map(x => Buffer.from(x, 'base64'));
+  const d = crypto.createDecipheriv('aes-256-gcm', k, iv); d.setAAD(Buffer.from(aad)); d.setAuthTag(tag);
+  return Buffer.concat([d.update(ct), d.final()]).toString('utf8');
+}
+const rest = (jwt, path, opts = {}) => fetch(process.env.SUPABASE_URL + '/rest/v1/' + path, {
+  ...opts, headers: { apikey: process.env.SUPABASE_ANON_KEY, Authorization: 'Bearer ' + jwt, 'Content-Type': 'application/json', ...(opts.headers || {}) }, signal: AbortSignal.timeout(6000)
+});
+async function userKey(jwt, userId, provider) {
+  const r = await rest(jwt, `user_api_keys?select=key_enc&provider=eq.${provider}&limit=1`);
+  if (!r.ok) throw new Error('Could not read your saved keys. Run the updated supabase.sql in Supabase.');
+  const row = (await r.json())[0]; if (!row) return null;
+  try { return decrypt(row.key_enc, userId + ':' + provider); }
+  catch { throw new Error('Your saved ' + PROVIDER_LABELS[provider] + ' key could not be decrypted (KEY_ENCRYPTION_SECRET changed?). Re-enter it in Settings.'); }
+}
+
 // Record usage in Supabase under the signed-in user's own session (row-level security applies),
 // so the totals are shared by every device that logs in as this user.
 async function logUsage(jwt, row) {
@@ -72,16 +103,43 @@ export async function handler(event) {
       adminEmail: process.env.ADMIN_EMAIL || ''
     });
   }
-  if (!['providers', 'chat', 'models'].includes(action)) return response(404, { error: 'Not found' });
+  if (!['providers', 'chat', 'models', 'keys'].includes(action)) return response(404, { error: 'Not found' });
   const jwt = (event.headers.authorization || event.headers.Authorization || '').replace(/^Bearer /i, '');
   if (!jwt) return response(401, { error: 'Sign in required' });
   try {
     const auth = await fetch(process.env.SUPABASE_URL + '/auth/v1/user', { headers: { apikey: process.env.SUPABASE_ANON_KEY, Authorization: 'Bearer ' + jwt } });
     if (!auth.ok) return response(401, { error: 'Invalid session' });
     const user = await auth.json();
-    if (!user.id || user.email?.toLowerCase() !== process.env.ADMIN_EMAIL?.toLowerCase()) return response(403, { error: 'Not authorized' });
+    if (!user.id) return response(401, { error: 'Invalid session' });
+    // Any account you created in Supabase may sign in. Only the admin may fall back to the Netlify-level keys.
+    const isAdmin = !!process.env.ADMIN_EMAIL && user.email?.toLowerCase() === process.env.ADMIN_EMAIL.toLowerCase();
 
-    if (action === 'providers') return response(200, Object.fromEntries(Object.entries(providers).map(([k, v]) => [k, !!process.env[v.env]])));
+    if (action === 'providers') {
+      const r = await rest(jwt, 'user_api_keys?select=provider,last4');
+      const mine = r.ok ? Object.fromEntries((await r.json()).map(x => [x.provider, x.last4])) : {};
+      return response(200, {
+        email: user.email, isAdmin, encryptionReady: !!encKey(), tableReady: r.ok,
+        providers: Object.fromEntries(Object.entries(providers).map(([k, v]) => [k, mine[k] !== undefined ? { configured: true, source: 'user', last4: mine[k] } : isAdmin && process.env[v.env] ? { configured: true, source: 'server' } : { configured: false }]))
+      });
+    }
+
+    if (action === 'keys') {
+      if (event.httpMethod !== 'POST') return response(405, { error: 'Method not allowed' });
+      const { provider, key, remove } = JSON.parse(event.body || '{}');
+      if (!Object.hasOwn(providers, provider)) return response(400, { error: 'Unknown provider' });
+      if (remove) {
+        const r = await rest(jwt, `user_api_keys?user_id=eq.${user.id}&provider=eq.${provider}`, { method: 'DELETE' });
+        return r.ok ? response(200, { ok: true }) : response(500, { error: 'Could not remove the key. Run the updated supabase.sql in Supabase.' });
+      }
+      const k = typeof key === 'string' ? key.trim() : '';
+      if (k.length < 8 || k.length > 600 || /\s/.test(k)) return response(400, { error: 'That does not look like an API key (no spaces, at least 8 characters).' });
+      const key_enc = encrypt(k, user.id + ':' + provider);
+      const r = await rest(jwt, 'user_api_keys?on_conflict=user_id,provider', {
+        method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify({ user_id: user.id, provider, key_enc, last4: k.slice(-4), updated_at: new Date().toISOString() })
+      });
+      return r.ok ? response(200, { ok: true, last4: k.slice(-4) }) : response(500, { error: 'Could not save the key. Run the updated supabase.sql in Supabase.' });
+    }
 
     if (action === 'models') {
       const provider = event.queryStringParameters?.provider;
@@ -96,8 +154,10 @@ export async function handler(event) {
       !messages.every(m => m && ['user', 'assistant', 'system'].includes(m.role) && validContent(m.content)) || countImages(messages) > MAX_IMAGES_TOTAL) {
       return response(400, { error: 'Invalid request' });
     }
-    const p = providers[provider], key = process.env[p.env];
-    if (!key) return response(400, { error: 'Configure ' + p.env + ' in Netlify environment variables' });
+    const p = providers[provider];
+    let key = await userKey(jwt, user.id, provider);
+    if (!key && isAdmin) key = process.env[p.env];
+    if (!key) return response(400, { error: 'Add your ' + PROVIDER_LABELS[provider] + ' API key in Settings → API keys to use this provider.' });
 
     const r = await fetch(p.url, {
       method: 'POST',
