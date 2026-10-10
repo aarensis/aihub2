@@ -69,3 +69,9 @@
 - **Required new variable:** `KEY_ENCRYPTION_SECRET` (16+ chars, mark as secret). If you change or lose it, saved keys cannot be decrypted and users must re-enter them.
 - Trust note: this protects keys from database leaks, not from the site owner, who controls the server secret.
 - Re-run `supabase.sql` once more (adds `user_api_keys`).
+
+
+## Update: served-model check, usage donuts, per-model limits
+- **Served model**: every reply shows which model the provider says answered. Green "served by X" = matches (or a versioned build of it); amber "requested X → served Y" = the provider answered with a different model; "router picked Y" for `openrouter/free`. If a provider doesn't report it, the reply says so.
+- **Donut charts** in the token panel for today / week / month: red = used, green = left, grey dashed = no limit set.
+- **Token limits manager** ("Set limits"): set day/week/month limits for any individual model, for a whole provider key, or for everything combined. Saved to your login. Grey hints show published free-tier caps. Sending while a limit is already used up asks for confirmation first (it warns; it does not hard-block).
